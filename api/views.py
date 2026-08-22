@@ -30,7 +30,9 @@ class PatientViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         if self.action == "list":
-            return Patient.objects.annotate(observation_count=Count("observations"))
+            return Patient.objects.annotate(
+                observation_count=Count("observations")
+            ).order_by("fhir_id")
         return Patient.objects.all()
 
 

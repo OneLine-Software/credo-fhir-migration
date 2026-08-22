@@ -4,12 +4,15 @@ from datetime import datetime, timezone
 
 
 def _safe_get(obj, *keys, default=None):
-    """Traverse nested dict keys safely, returning default if any key is missing."""
+    """Traverse nested dict/list structures safely, returning default if any key is missing."""
     current = obj
     for key in keys:
-        if not isinstance(current, dict):
+        if isinstance(current, dict):
+            current = current.get(key)
+        elif isinstance(current, list) and isinstance(key, int) and 0 <= key < len(current):
+            current = current[key]
+        else:
             return default
-        current = current.get(key)
         if current is None:
             return default
     return current
