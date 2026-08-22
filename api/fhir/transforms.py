@@ -1,6 +1,6 @@
 """Transform FHIR R4 resources into our simplified internal model dicts."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _safe_get(obj, *keys, default=None):
@@ -26,14 +26,19 @@ def _parse_fhir_date(date_str):
 
 
 def _parse_fhir_datetime(dt_str):
-    """Parse a FHIR dateTime string into a datetime object."""
+    """Parse a FHIR dateTime string into a timezone-aware datetime."""
     if not dt_str:
         return None
     try:
         # FHIR datetimes can be "2024-01-01" or "2024-01-01T12:00:00+00:00"
         if "T" in dt_str:
-            return datetime.fromisoformat(dt_str)
-        return datetime.strptime(dt_str[:10], "%Y-%m-%d")
+            dt = datetime.fromisoformat(dt_str)
+        else:
+            dt = datetime.strptime(dt_str[:10], "%Y-%m-%d")
+        # Ensure timezone-aware (Django USE_TZ=True expects aware datetimes)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except (ValueError, TypeError):
         return None
 
