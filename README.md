@@ -32,36 +32,40 @@ of 100 that loses roughly 90% of observations with no error. See
 
 ### Prerequisites
 
-- Python 3.12+
-- Node.js 20+
+- Python 3.12+ (tested on 3.14)
+- Node.js 20+ (tested on 22)
 
-### Backend
+No credentials, API keys, or services to configure — it runs as-is.
+
+### Terminal 1 — backend
 
 ```bash
-# Create and activate virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate   # Windows
+source .venv/bin/activate          # macOS/Linux
+# .venv\Scripts\activate           # Windows
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Run database migrations
 python manage.py migrate
 
-# Migrate patient data from FHIR sandbox
-python manage.py migrate_fhir
-
-# For testing (migrate only 2 pages):
-python manage.py migrate_fhir --max-pages 2
-
-# Start the API server
-python manage.py runserver
+python manage.py migrate_fhir      # ~2.5 min against the live sandbox
+python manage.py runserver         # leave running
 ```
 
-The API is now available at `http://localhost:8000/api/`.
+`migrate_fhir` pulls ~7,000 patients and ~38,000 observations. It prints a line per
+page as it goes, so if it looks idle for more than a few seconds something is wrong —
+it isn't silent. It ends with a validation summary and exits non-zero on failure.
 
-### Frontend
+In a hurry? `python manage.py migrate_fhir --max-pages 5` gives you a few hundred
+patients in seconds. Note that a partial run is *deliberately* left resumable, so the
+patient list will show an amber "last migration run is running at patient offset N"
+banner. That banner is the feature working, not a bug — it exists so an incomplete
+migration is never presented as the full dataset. Re-run without `--max-pages` to
+finish (it resumes), or `--restart` to start clean.
+
+### Terminal 2 — frontend
+
+`runserver` occupies the first terminal, so open a second one. The Vite dev server
+proxies `/api` to `127.0.0.1:8000`, so the backend needs to be running.
 
 ```bash
 cd frontend
@@ -69,7 +73,17 @@ npm install
 npm run dev
 ```
 
-The frontend is now available at `http://localhost:5173`.
+- Frontend: <http://localhost:5173>
+- API: <http://localhost:8000/api/>
+
+### If the sandbox is having a bad day
+
+`https://hapi.fhir.org/baseR4` is a shared public server that is periodically reset.
+If it is down, empty, or throttling, `migrate_fhir` will retry transient failures and
+then abort with a non-zero exit and a message naming the cause — it will not write
+half a dataset and claim success. Re-run it later; the migration is resumable and
+idempotent, so nothing is lost. To point at a different server:
+`FHIR_BASE_URL=https://your-server/baseR4 python manage.py migrate_fhir`.
 
 ### Admin Interface
 

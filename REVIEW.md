@@ -339,6 +339,30 @@ Also in this pass:
   error), and the patient list shows a banner when the last run didn't finish, so an
   incomplete migration isn't silently presented as the full dataset.
 
+## 12. Phantom run rows (found by rehearsing the reviewer's setup)
+
+Found by cloning the repo fresh and walking the README as a reviewer would, then
+pointing `FHIR_BASE_URL` at an unreachable host to check the failure message.
+
+`_start_run` created the `MigrationRun` row *before* reading the server's expected
+counts. When that read failed, the `CommandError` propagated and left a `running` row
+at offset 0 that nothing would ever mark failed. Consequences, in order of how much
+they'd matter to someone using this:
+
+1. The patient list showed the amber "migration incomplete at offset 0" banner over a
+   complete 7,205-patient dataset — the warning that exists to prevent
+   misinterpretation became the thing causing it.
+2. The status was simply untrue: `running` with no process running.
+3. No `error` was recorded, so nothing explained why.
+
+Anyone whose first attempt hit a sandbox blip would have seen this. Fixed by reading
+the counts before touching any run row, so a startup failure persists nothing at all.
+Two tests cover it; both fail against the previous code.
+
+The general lesson: exercising the *setup path from scratch* found a bug that 44
+passing tests and several full migrations did not, because the tests all started from
+a working server.
+
 ## Deliberately not done
 
 - **`component` arrays** on panel observations (blood pressure systolic/diastolic).

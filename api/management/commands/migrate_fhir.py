@@ -103,7 +103,15 @@ class Command(BaseCommand):
     # --- checkpointing -----------------------------------------------------
 
     def _start_run(self, client, restart):
-        """Resume the last unfinished run, or open a new one."""
+        """
+        Resume the last unfinished run, or open a new one.
+
+        Expected counts are read *before* any run row is touched. Doing it the
+        other way round meant an unreachable server left behind a `running` row
+        at offset 0 that nothing would ever mark failed — so the UI reported an
+        incomplete migration over a complete dataset, with no error to explain it.
+        """
+        expected = self._fetch_expected_counts(client)
         unfinished = MigrationRun.resumable()
 
         if unfinished and not restart:
@@ -128,7 +136,6 @@ class Command(BaseCommand):
                 )
             run = MigrationRun.objects.create()
 
-        expected = self._fetch_expected_counts(client)
         run.expected_patients = expected["patients"]
         run.expected_observations = expected["observations"]
         run.save(update_fields=["expected_patients", "expected_observations", "updated_at"])

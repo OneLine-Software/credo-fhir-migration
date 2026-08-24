@@ -335,11 +335,19 @@ class FhirClientPaginationTest(TestCase):
 class FakeFhirClient:
     """Stands in for FhirClient in migration command tests."""
 
-    def __init__(self, patient_pages, observation_pages=None, counts=None, fail_after_pages=None):
+    def __init__(
+        self,
+        patient_pages,
+        observation_pages=None,
+        counts=None,
+        fail_after_pages=None,
+        fail_on_counts=False,
+    ):
         self.patient_pages = patient_pages
         self.observation_pages = observation_pages or []
         self.counts = counts or {}
         self.fail_after_pages = fail_after_pages
+        self.fail_on_counts = fail_on_counts
         self.observation_requests = []
         self.start_offsets = []
         self.closed = False
@@ -351,6 +359,8 @@ class FakeFhirClient:
         self.closed = True
 
     def get_resource_count(self, resource_type, search_params=None):
+        if self.fail_on_counts:
+            raise FhirApiError("server unreachable")
         return self.counts.get(resource_type)
 
     def iter_patient_pages(self, start_offset=0):
@@ -535,6 +545,28 @@ class MigrationCheckpointTest(TestCase):
         self.assertEqual(resuming.start_offsets, [1])
         self.assertEqual(MigrationRun.objects.get().status, MigrationRun.Status.COMPLETE)
         self.assertEqual(Patient.objects.count(), 2)
+
+    def test_unreachable_server_leaves_no_phantom_run(self):
+        """
+        A startup failure must not record a run at all.
+
+        It previously created the row before reading the server's counts, so an
+        unreachable server left a `running` row at offset 0 that nothing would
+        mark failed — the UI then reported an incomplete migration over a
+        complete dataset, with no error to explain it.
+        """
+        with self.assertRaises(CommandError):
+            self.run_command(FakeFhirClient(patient_pages=[], fail_on_counts=True))
+        self.assertFalse(MigrationRun.objects.exists())
+
+    def test_unreachable_server_does_not_disturb_an_earlier_run(self):
+        self.run_command(FakeFhirClient(patient_pages=[self.patients("p1")]))
+        with self.assertRaises(CommandError):
+            self.run_command(FakeFhirClient(patient_pages=[], fail_on_counts=True))
+
+        run = MigrationRun.objects.get()
+        self.assertEqual(run.status, MigrationRun.Status.COMPLETE)
+        self.assertIsNone(MigrationRun.resumable())
 
     def test_restart_ignores_the_checkpoint(self):
         pages = [self.patients("p1"), self.patients("p2")]
