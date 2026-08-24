@@ -2,7 +2,7 @@
 
 from rest_framework import serializers
 
-from api.models import Patient, Observation
+from api.models import MigrationRun, Observation, Patient
 
 
 class ObservationSerializer(serializers.ModelSerializer):
@@ -22,6 +22,26 @@ class ObservationSerializer(serializers.ModelSerializer):
             "value_unit",
             "value_system",
             "value_code",
+        ]
+
+
+class MigrationRunSerializer(serializers.ModelSerializer):
+    """Progress of a migration run, for the status endpoint."""
+
+    class Meta:
+        model = MigrationRun
+        fields = [
+            "status",
+            "patients_offset",
+            "patients_written",
+            "patients_skipped",
+            "observations_written",
+            "observations_skipped",
+            "expected_patients",
+            "expected_observations",
+            "error",
+            "started_at",
+            "updated_at",
         ]
 
 

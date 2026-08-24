@@ -5,8 +5,9 @@ from rest_framework import viewsets
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from api.models import Patient, Observation
+from api.models import MigrationRun, Observation, Patient
 from api.serializers import (
+    MigrationRunSerializer,
     PatientListSerializer,
     PatientDetailSerializer,
     ObservationSerializer,
@@ -57,10 +58,16 @@ class ObservationViewSet(viewsets.ReadOnlyModelViewSet):
 
 @api_view(["GET"])
 def migration_status(request):
-    """Quick endpoint to check migration progress from the frontend."""
-    patient_count = Patient.objects.count()
-    observation_count = Observation.objects.count()
+    """
+    Migration progress for the frontend.
+
+    `last_run` is null before the first run; its `status` distinguishes a
+    complete migration from one that is still going or stopped part-way, so the
+    UI can say whether the counts below are the whole picture.
+    """
+    last_run = MigrationRun.objects.first()
     return Response({
-        "patients": patient_count,
-        "observations": observation_count,
+        "patients": Patient.objects.count(),
+        "observations": Observation.objects.count(),
+        "last_run": MigrationRunSerializer(last_run).data if last_run else None,
     })
