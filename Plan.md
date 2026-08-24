@@ -6,6 +6,21 @@ Migrate ~50,000 patient records and their associated observations from a legacy
 clinical system (FHIR R4 API) into a new internal service. The migration must be
 reliable, observable, safe with PHI, and reversible.
 
+### At a glance
+
+| | |
+|---|---|
+| **Fetch** | Page `/Patient?_sort=_id`, then `/Observation?subject=…` in batches of 50 refs. Deliberately *not* `_revinclude` — HAPI truncates includes at 1000/page, silently. |
+| **Write** | Bulk upsert keyed on FHIR id. Idempotent by construction, so any retry converges. |
+| **Resume** | `MigrationRun` checkpoint per page (`_offset` cursor), advanced only after the page is fully durable. At-least-once. |
+| **Limits** | Retry `429/502/503/504` only, honour `Retry-After`, capped backoff, 30s timeout, configurable inter-page delay. |
+| **Validate** | Counts vs the server's own totals, a null-column canary for broken mappings, referential integrity enforced by the FK. |
+| **PHI** | Synthetic data only here. Logs reference FHIR ids, never names. Least-privilege writer, TLS, encryption at rest, BAA context. |
+| **Rollback** | Source is read-only. Re-run to converge; break-glass truncate + re-run held by a separate role. |
+
+The sections below expand each of these. Corrections discovered while implementing
+are marked and cross-referenced to [REVIEW.md](REVIEW.md).
+
 ---
 
 ## 1. Overall Approach
@@ -14,14 +29,27 @@ reliable, observable, safe with PHI, and reversible.
 
 ### Fetch strategy
 
-Paginate through all Patient resources using `_count=100`. For each page, use
-`_revinclude=Observation:patient` to fetch patients and their observations in a
-single paginated request sequence — instead of issuing a separate Observation
-query per patient.
+Paginate through all Patient resources using `_count=100&_sort=_id`, then fetch
+their observations with a second paginated search that ORs together the patient
+references from that page:
 
-With 50K patients averaging ~6 observations each, per-patient fetching would mean
-50K+ API calls. The `_revinclude` approach batches this: 100 patients + ~600
-observations per page, reducing API calls by an order of magnitude.
+```
+GET /Patient?_count=100&_sort=_id
+GET /Observation?subject=Patient/a,Patient/b,…&_count=200   (batches of 50 refs)
+```
+
+With 50K patients averaging ~6 observations each, fetching observations one patient
+at a time would mean 50K+ API calls. Batching the subject references keeps that
+close to the per-page cost: the full 6,954-patient sandbox migrated in **365
+requests**.
+
+`_sort=_id` matters — it makes the page order deterministic, so two runs walk the
+patients in the same sequence.
+
+> This plan originally used `_revinclude=Observation:patient` to fetch patients and
+> observations together. That silently loses ~90% of observations on HAPI, which
+> caps included resources at 1000 per page. Measurements and reasoning:
+> [REVIEW.md §1](REVIEW.md).
 
 ### Idempotency
 
@@ -32,20 +60,40 @@ safe to restart and re-run.
 
 ### Resumability
 
-A `migration_state` table tracks progress:
+A `migration_state` table tracks progress. As built (`MigrationRun`):
 
 | field | description |
 |-------|-------------|
-| `last_processed_offset` | last page offset successfully written |
-| `patients_seen` | cumulative count fetched from FHIR |
-| `patients_written` | cumulative count persisted |
-| `observations_seen` | cumulative count fetched |
-| `observations_written` | cumulative count persisted |
-| `status` | `running` / `paused` / `complete` / `failed` |
-| `last_batch_at` | timestamp of last successful batch |
+| `patients_offset` | patients consumed from the source — the `_offset` to resume at |
+| `patients_written` / `observations_written` | cumulative counts persisted |
+| `patients_skipped` / `observations_skipped` | cumulative counts rejected, with reasons in the log |
+| `expected_patients` / `expected_observations` | server totals captured at the start of the run |
+| `status` | `running` / `complete` / `failed` |
+| `error` | failure reason, so a resumed run says what it recovered from |
+| `started_at` / `updated_at` | run start, and the last successful batch |
+
+A `running` row whose process was killed is indistinguishable from one still in
+flight. Both are treated as resumable, which is safe precisely because every write is
+an idempotent upsert — the worst case is replaying one page.
 
 If the migration crashes, it resumes from the last checkpoint rather than
-restarting from zero.
+restarting from zero. **Implemented** — see `MigrationRun` in `api/models.py`.
+
+The checkpoint cannot be the `next` link — HAPI's paging links are opaque server-side
+caches (`_getpages=<uuid>`) that are useless once a process dies. The cursor that
+survives is `_sort=_id` + `_offset=<patients consumed>`. A keyset cursor
+(`_id=gt<last>`) would be preferable, but `_id` is a *token* parameter and token
+parameters take no comparison prefixes.
+
+**Write ordering matters.** The checkpoint advances only after a page's patients *and*
+their observations are committed, so a crash in between replays the page rather than
+skipping it — harmless, because every write is an upsert. At-least-once, never
+at-most-once.
+
+**Residual risk:** with offset paging, a patient inserted before the cursor shifts the
+window and a resumed run could skip a record. The final count comparison catches it
+and a re-run converges. Both cursor forms were tested against the sandbox —
+measurements in [REVIEW.md §11](REVIEW.md).
 
 ### API limits and backoff
 
@@ -67,29 +115,30 @@ restarting from zero.
   failed, and total duration.
 
 ```
-PSEUDOCODE — fetch and upsert loop:
+FETCH AND UPSERT LOOP (as implemented in migrate_fhir.py):
 
-state = load_migration_state()
-while state.status != "complete":
-    patients, observations, next_url = fetch_batch(
-        offset=state.last_processed_offset,
-        count=100,
-        revinclude="Observation:patient"
-    )
+run = MigrationRun.resumable() or MigrationRun.objects.create()
+run.expected_patients, run.expected_observations = server_counts()
+
+for patients in iter_patient_pages(start_offset=run.patients_offset):
+    # Patients first and in their own transaction: the observations that follow
+    # need the FK targets to exist, and no transaction should stay open across
+    # an HTTP call.
     with transaction:
-        for patient in patients:
-            upsert_patient(transform_patient(patient))
-        for obs in observations:
-            upsert_observation(transform_observation(obs))
-        state.last_processed_offset += len(patients)
-        state.patients_written += len(patients)
-        state.observations_written += len(observations)
-        save(state)
-    log_batch_progress(state)
+        bulk_upsert(Patient, [transform_patient(p) for p in patients])
+    patient_ids = {p.id for p in patients}
 
-    if next_url is None:
-        state.status = "complete"
-        save(state)
+    for observations in iter_observation_pages(patient_ids):
+        with transaction:
+            bulk_upsert(Observation, [transform_observation(o) for o in observations
+                                      if resolves_to(o, patient_ids)])
+
+    # Only now — the page is fully durable, so resuming here loses nothing.
+    run.patients_offset += len(patients)
+    run.save()
+
+run.status = "complete"
+run.save()
 ```
 
 ---
@@ -160,32 +209,36 @@ schema, keeping only the fields the internal service needs.
 Query the FHIR server for total Patient and Observation counts
 (`?_summary=count`) and store as expected totals in `migration_state`.
 
+The Observation total must be filtered to resources we can actually map:
+`Observation?subject:missing=false&_summary=count`. On the sandbox 4,070 of 42,000
+observations have no subject at all, so comparing against the raw total reports a
+4,000-record phantom gap that hides any real one.
+
 ### Post-migration (automated)
 
 1. **Count comparison**: `SELECT COUNT(*) FROM patients` vs. expected total from
    FHIR. Repeat for observations. Flag any mismatch.
 
-2. **Referential integrity**: Check for orphaned observations — observations whose
-   `patient_id` doesn't exist in the `patients` table. This catches cases where a
-   patient was deleted on the FHIR server mid-migration.
+2. **Referential integrity**: observations must not reference a patient we don't
+   have. Rather than checking for orphans after the fact, the schema makes them
+   impossible — `patient` is a non-null FK, so an orphan cannot be committed. An
+   observation whose subject isn't a migrated patient is skipped and counted
+   instead, which turns a silent data-integrity problem into a visible number.
 
-   ```sql
-   SELECT COUNT(*) FROM observations o
-   LEFT JOIN patients p ON o.patient_id = p.fhir_id
-   WHERE p.fhir_id IS NULL;
-   -- Expected: 0
-   ```
+3. **Null-column canary**: if a field is NULL on *every* migrated row, treat it as a
+   broken mapping rather than sparse source data and fail the validation. A row count
+   never catches that class of bug; a per-field count does, on the first run.
 
-3. **Spot-check sampling**: Randomly select 10 patients from the internal DB,
+4. **Spot-check sampling**: Randomly select 10 patients from the internal DB,
    fetch the same patient from FHIR, and compare field-by-field. Log any
    discrepancies.
 
-4. **No-data-loss check**: Cumulative `patients_seen` and `observations_seen` from
+5. **No-data-loss check**: Cumulative `patients_seen` and `observations_seen` from
    the FHIR responses should equal `patients_written` and `observations_written`
    plus any logged failures. If FHIR returned 100 patients in a batch and we wrote
    98, the other 2 should appear in the error log with reasons.
 
-5. **Failed-resource report**: Review all entries in the error log before
+6. **Failed-resource report**: Review all entries in the error log before
    declaring the migration complete. Decide whether failures are acceptable
    (deleted resources) or require investigation (parse errors, schema mismatches).
 
@@ -242,6 +295,10 @@ The following applies to a **production version** of this migration:
 4. **Full rollback** (worst case — schema is wrong or data is corrupted):
    - `TRUNCATE patients, observations, migration_state RESTART IDENTITY`
    - Re-run the migration from scratch — safe because the source is read-only.
+   - Note this is deliberately *not* something the migration service account can do
+     (see §4.4 — it holds `INSERT`/`UPDATE` only). A full rollback is a break-glass
+     action performed by a separate operator role, so a bug in the migration can
+     never destroy the destination table.
 
 5. **Partial rollback** (specific batch introduced bad data):
    - Identify the batch by time window (`migrated_at` falls within the batch's
