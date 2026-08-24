@@ -10,22 +10,36 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _env_flag(name, default):
+    return os.environ.get(name, default).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-(gkm+u4_^&c68t&go$(_s4w+(u)^(y3xzzegrsb*d63lfcf_g1'
+# The fallback exists so the exercise runs with zero configuration; a real
+# deployment must set DJANGO_SECRET_KEY.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-dev-only-do-not-use-outside-local-development',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = _env_flag('DJANGO_DEBUG', 'True')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    if host.strip()
+]
 
 
 # Application definition
@@ -59,11 +73,22 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:5173',
 ]
 
-# DRF config — pagination makes list endpoints cleaner
+# DRF config — pagination makes list endpoints cleaner.
+# COERCE_DECIMAL_TO_STRING=False so observation values serialise as JSON numbers
+# (126.0) rather than padded strings ("126.0000") that clients must reformat.
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    'COERCE_DECIMAL_TO_STRING': False,
 }
+
+# FHIR source server.
+# SYNTHETIC DATA ONLY — never point this at a system holding real PHI.
+FHIR_BASE_URL = os.environ.get('FHIR_BASE_URL', 'https://hapi.fhir.org/baseR4')
+FHIR_PAGE_SIZE = int(os.environ.get('FHIR_PAGE_SIZE', '100'))
+FHIR_OBSERVATION_PAGE_SIZE = int(os.environ.get('FHIR_OBSERVATION_PAGE_SIZE', '200'))
+FHIR_MAX_RETRIES = int(os.environ.get('FHIR_MAX_RETRIES', '3'))
+FHIR_REQUEST_TIMEOUT = int(os.environ.get('FHIR_REQUEST_TIMEOUT', '30'))
 
 ROOT_URLCONF = 'fhir_migration.urls'
 
@@ -125,6 +150,37 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
+
+
+# Logging
+# https://docs.djangoproject.com/en/6.1/topics/logging/
+# Django's default config only wires up the 'django' logger, so without this the
+# migration's own log records (retries, skipped resources) go nowhere.
+# Records reference patients by FHIR id only — never by name or other PHI.
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'labelled': {
+            'format': '{asctime} {levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'labelled',
+        },
+    },
+    'loggers': {
+        'api': {
+            'handlers': ['console'],
+            'level': os.environ.get('MIGRATION_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+    },
+}
 
 
 # Static files (CSS, JavaScript, Images)
