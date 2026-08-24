@@ -13,7 +13,7 @@ export function fetchPatients(page = 1) {
 }
 
 export function fetchPatient(id) {
-  return fetchJson(`${API_BASE}/patients/${id}/`)
+  return fetchJson(`${API_BASE}/patients/${encodeURIComponent(id)}/`)
 }
 
 export function fetchMigrationStatus() {
