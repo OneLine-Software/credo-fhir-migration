@@ -1,7 +1,12 @@
 # Code review follow-up
 
 Notes from a review pass over the first working slice, and what changed as a result.
-Ordered by severity. Nothing here is committed yet.
+Ordered by severity. Two entries are corrections to my own earlier reasoning (§11, §2),
+kept visible rather than quietly fixed.
+
+Counts below are measurements from specific runs against the live HAPI sandbox, which
+grew from 6,954 to 7,205 patients over the couple of days this was built — so figures
+differ between sections, and your own run will differ again.
 
 ---
 
@@ -253,7 +258,7 @@ on both primary keys (it created a superfluous second index).
 
 ## Tests
 
-13 → 44. The new ones cover the parts that were previously untested:
+13 → 46. The new ones cover the parts that were previously untested:
 
 - `FhirClientRetryTest` — transient retry, `Retry-After`, timeouts, fail-fast on 4xx,
   exhaustion, and that the failure reason survives into the exception.

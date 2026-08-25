@@ -111,7 +111,7 @@ source .venv/bin/activate
 python manage.py test api -v2
 ```
 
-36 tests covering:
+46 tests covering:
 - FHIR-to-internal transforms (field mapping, reference forms, `effective[x]` fallbacks, decimal precision, missing fields)
 - The FHIR client's failure handling (retry/backoff, `Retry-After`, timeouts, fail-fast on 4xx, pagination, observation batching)
 - The migration command end to end against a stubbed client (mapping, idempotency, skipped resources, validation output, non-zero exit on upstream failure)
@@ -214,13 +214,25 @@ Tracked against the suggested 3-hour cap:
 | Part 2 — initial working slice (models, client, transforms, command, API, frontend) | ~17 min |
 | Part 2 — review and hardening pass (see [REVIEW.md](REVIEW.md)) | ~75 min |
 | Frontend composables refactor | ~15 min |
-| **Total** | **≈ 2 h 25 min** |
+| Setup rehearsal from a clean clone, and the bug it found | ~30 min |
+| **Total** | **≈ 2 h 55 min** |
 
 The hardening pass is the largest block and was not polish: it is where the
 `_revinclude` data loss, the `transaction.atomic()` misuse, and the exit-code bug were
 found and fixed. Verifying against the live sandbox is what surfaced them — the
 original `_revinclude` check passed because it was run with 2 patients, well below the
 1000-include cap that breaks it at scale.
+
+The last block was rehearsing this README: cloning into an empty directory, following
+it verbatim, and pointing `FHIR_BASE_URL` at an unreachable host to see what a bad day
+looks like. That found a real bug (REVIEW.md §12) that 44 passing tests and several
+successful migrations had not, because every one of them started from a working server.
+
+**A note on the numbers in this repo.** The sandbox is shared and live — it grew from
+6,954 to 7,205 patients over the couple of days this was built. Counts quoted here and
+in REVIEW.md are measurements from specific runs, so expect your own run to differ
+slightly. The validation summary compares against whatever the server reports at the
+time, not against these figures.
 
 ## AI Usage
 
